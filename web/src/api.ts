@@ -14,8 +14,17 @@ export class ApiError extends Error {
   }
 }
 
+/** 409 响应中服务端返回的首次提交内容（权威映射） */
+export interface ConflictExisting {
+  scene_id: string;
+  notes: string;
+  shot_number?: number;
+}
+
 /** 409：同一 client_op_id 携带了不同内容 */
-export class ConflictError extends ApiError {}
+export class ConflictError extends ApiError {
+  existing?: ConflictExisting;
+}
 
 /** 503：服务暂时不可用（含注入的“提交后崩溃”故障），可安全重试 */
 export class ServiceUnavailableError extends ApiError {}
@@ -37,16 +46,22 @@ function apiBase(): string {
 async function parseError(res: Response): Promise<never> {
   let code = "unknown";
   let message = `请求失败（HTTP ${res.status}）`;
+  let existing: ConflictExisting | undefined;
   try {
     const body = await res.json();
     if (body?.detail?.code || body?.detail?.error) {
       code = body.detail.code ?? body.detail.error;
     }
     if (body?.detail?.message) message = body.detail.message;
+    if (body?.detail?.existing) existing = body.detail.existing as ConflictExisting;
   } catch {
     /* 保留默认信息 */
   }
-  if (res.status === 409) throw new ConflictError(409, code, message);
+  if (res.status === 409) {
+    const err = new ConflictError(409, code, message);
+    err.existing = existing;
+    throw err;
+  }
   if (res.status === 503) throw new ServiceUnavailableError(503, code, message);
   throw new ApiError(res.status, code, message);
 }

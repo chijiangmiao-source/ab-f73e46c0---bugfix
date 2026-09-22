@@ -2,12 +2,15 @@
 
 事务边界（见 README）：
     BEGIN IMMEDIATE
-        1. 按 client_op_id 查操作映射 —— 命中则校验内容哈希并直接重放原号码；
+        1. 按 client_op_id 全局查操作映射 —— 命中则校验内容哈希并直接重放原号码；
         2. 否则在同一事务内读取并递增场次计数器、写入操作映射；
     COMMIT  —— 提交点即号码生效点，之后即使进程崩溃结果也已持久化。
 
 BEGIN IMMEDIATE 在事务开始时即取得数据库写锁，使所有发放事务严格串行：
 号码分配顺序 == 事务提交顺序，且并发下不会重复、不会跳号。
+
+client_op_id 全局唯一：同一标识无论场次如何变化，永远代表首次提交的操作；
+携带不同内容（含不同场次）重用时返回 409，绝不在新场次再次占号。
 """
 from __future__ import annotations
 
@@ -15,7 +18,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 
-from sqlalchemy import and_, insert, select, update
+from sqlalchemy import insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 
@@ -25,10 +28,17 @@ from .models import Operation, SceneCounter
 class PayloadConflictError(Exception):
     """同一 client_op_id 携带了与首次提交不同的内容。"""
 
-    def __init__(self, client_op_id: str, existing_scene_id: str, existing_notes: str):
+    def __init__(
+        self,
+        client_op_id: str,
+        existing_scene_id: str,
+        existing_notes: str,
+        existing_shot_number: int,
+    ):
         self.client_op_id = client_op_id
         self.existing_scene_id = existing_scene_id
         self.existing_notes = existing_notes
+        self.existing_shot_number = existing_shot_number
         super().__init__(f"client_op_id {client_op_id!r} already used with different payload")
 
 
@@ -39,18 +49,6 @@ class Allocation:
     notes: str
     shot_number: int
     created: bool  # True=本次新发放；False=重放既有映射
-
-
-@dataclass(frozen=True)
-class OperationScope:
-    scene_id: str
-    client_op_id: str
-
-    def predicate(self):
-        return and_(
-            Operation.scene_id == self.scene_id,
-            Operation.client_op_id == self.client_op_id,
-        )
 
 
 def content_hash(scene_id: str, notes: str) -> str:
@@ -68,19 +66,34 @@ def allocate_shot_number(
 ) -> Allocation:
     """在单个 IMMEDIATE 事务内完成幂等检查与发号，提交后返回。"""
     digest = content_hash(scene_id, notes)
-    scope = OperationScope(scene_id=scene_id, client_op_id=client_op_id)
     with engine.connect() as conn:
         conn.exec_driver_sql("BEGIN IMMEDIATE")
         try:
+            # 全局查找：client_op_id 始终代表首次提交的操作，与本次请求的场次无关
             existing = conn.execute(
-                select(Operation.shot_number, Operation.payload_hash, Operation.scene_id, Operation.notes)
-                .where(scope.predicate())
+                select(
+                    Operation.shot_number,
+                    Operation.payload_hash,
+                    Operation.scene_id,
+                    Operation.notes,
+                ).where(Operation.client_op_id == client_op_id)
             ).mappings().first()
             if existing is not None:
                 if existing["payload_hash"] != digest:
-                    raise PayloadConflictError(client_op_id, existing["scene_id"], existing["notes"])
+                    raise PayloadConflictError(
+                        client_op_id,
+                        existing["scene_id"],
+                        existing["notes"],
+                        existing["shot_number"],
+                    )
                 conn.exec_driver_sql("COMMIT")
-                return Allocation(scene_id, client_op_id, notes, existing["shot_number"], created=False)
+                return Allocation(
+                    existing["scene_id"],
+                    client_op_id,
+                    existing["notes"],
+                    existing["shot_number"],
+                    created=False,
+                )
 
             conn.execute(
                 sqlite_insert(SceneCounter)
@@ -134,9 +147,8 @@ def get_operation(engine: Engine, client_op_id: str, scene_id: str | None = None
     with engine.connect() as conn:
         statement = select(*_OPERATION_COLUMNS).where(Operation.client_op_id == client_op_id)
         if scene_id is not None:
-            statement = statement.where(
-                OperationScope(scene_id=scene_id, client_op_id=client_op_id).predicate()
-            )
-        statement = statement.order_by(Operation.id.desc())
+            statement = statement.where(Operation.scene_id == scene_id)
+        # 首次持久提交为权威（迁移后标识全局唯一，此排序仅作兜底）
+        statement = statement.order_by(Operation.id.asc())
         row = conn.execute(statement).mappings().first()
         return dict(row) if row is not None else None

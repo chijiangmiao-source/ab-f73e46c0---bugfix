@@ -24,7 +24,10 @@ class SceneCounter(Base):
 
 
 class Operation(Base):
-    """client_op_id -> 已发放镜号的不可变映射，同时记录内容哈希用于冲突检测。"""
+    """client_op_id -> 已发放镜号的不可变映射，同时记录内容哈希用于冲突检测。
+
+    client_op_id 全局唯一：同一标识无论场次如何变化，永远代表首次提交的操作。
+    """
 
     __tablename__ = "operations"
 
@@ -37,6 +40,6 @@ class Operation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
     __table_args__ = (
-        UniqueConstraint("scene_id", "client_op_id", name="uq_operations_scene_client_op"),
+        UniqueConstraint("client_op_id", name="uq_operations_client_op"),
         UniqueConstraint("scene_id", "shot_number", name="uq_operations_scene_shot"),
     )

@@ -51,7 +51,11 @@ def create_app(db_path: str | None = None, dev_mode: bool | None = None) -> Fast
                     "error": "payload_conflict",
                     "message": "client_op_id 已被不同内容占用，请更换操作标识",
                     "client_op_id": exc.client_op_id,
-                    "existing": {"scene_id": exc.existing_scene_id, "notes": exc.existing_notes},
+                    "existing": {
+                        "scene_id": exc.existing_scene_id,
+                        "notes": exc.existing_notes,
+                        "shot_number": exc.existing_shot_number,
+                    },
                 },
             ) from exc
 

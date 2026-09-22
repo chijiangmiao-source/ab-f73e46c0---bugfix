@@ -99,7 +99,16 @@ export default function App() {
     } catch (err) {
       // 失败一律保留待重试操作，由用户决定何时重试
       if (err instanceof ConflictError) {
-        setError({ kind: "conflict", message: err.message });
+        // 明确指向首次提交的内容，便于回到原场次找回已生效的镜号
+        const first = err.existing
+          ? `首次提交：场次 ${err.existing.scene_id}` +
+            (err.existing.notes ? `，备注“${err.existing.notes}”` : "") +
+            (err.existing.shot_number != null
+              ? `，镜号 #${err.existing.shot_number}`
+              : "") +
+            "。"
+          : "";
+        setError({ kind: "conflict", message: `${err.message}${first}` });
       } else if (err instanceof ServiceUnavailableError) {
         setError({
           kind: "unavailable",
@@ -133,8 +142,15 @@ export default function App() {
   function handleSubmit(ev: FormEvent) {
     ev.preventDefault();
     if (submitting) return;
-    // 有待重试操作时复用其 client_op_id —— 重试同一逻辑操作而非新建操作
-    const op = buildOp(pending?.client_op_id ?? newOpId());
+    if (pending) {
+      // 有待重试操作时沿用其 client_op_id 提交当前表单内容 —— 重试同一逻辑
+      // 操作而非新建操作。但原待重试操作本身必须保留：若表单内容已被改动
+      // （如误切场次），服务端会返回 409，此时只有原操作还在，场记才能回到
+      // 原场次找回已生效的镜号。
+      void attempt(buildOp(pending.client_op_id));
+      return;
+    }
+    const op = buildOp(newOpId());
     setPending(op);
     savePending(op);
     void attempt(op);

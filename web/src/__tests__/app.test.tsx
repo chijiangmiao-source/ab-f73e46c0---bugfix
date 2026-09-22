@@ -84,4 +84,71 @@ describe("镜号发放页（真实 API 联调）", () => {
     submit();
     expect(await screen.findByTestId("result-card")).toHaveTextContent("镜号 #1");
   });
+
+  it("切换场次后重试展示冲突并保留原待重试操作，以新操作提交才为新场次发号", async () => {
+    const sceneA = `vitest-ui-A-${crypto.randomUUID()}`;
+    const sceneB = `vitest-ui-B-${crypto.randomUUID()}`;
+    render(<App />);
+    fillForm(sceneA, "吊臂全景");
+    fireEvent.click(screen.getByLabelText(/注入提交后故障/));
+    submit();
+    expect(await screen.findByTestId("error-unavailable")).toBeInTheDocument();
+    expect(screen.getByTestId("pending-banner")).toBeInTheDocument();
+
+    // 误切场次并改备注后重试 -> 冲突反馈（指向首次提交），原待重试操作保留
+    fillForm(sceneB, "轨道近景");
+    fireEvent.click(screen.getByLabelText(/注入提交后故障/)); // 关掉注入
+    submit();
+    const conflict = await screen.findByTestId("error-conflict");
+    expect(conflict).toHaveTextContent(`首次提交：场次 ${sceneA}`);
+    expect(conflict).toHaveTextContent("镜号 #1");
+    expect(screen.getByTestId("pending-banner")).toBeInTheDocument();
+
+    // 新场次未被发号
+    await waitFor(() =>
+      expect(screen.getByText("暂无已发放镜号")).toBeInTheDocument(),
+    );
+
+    // 选择“以新操作重新提交”后才为新场次领取号码（该场次首个号）
+    fireEvent.click(screen.getByRole("button", { name: "以新操作重新提交" }));
+    const card = await screen.findByTestId("result-card");
+    expect(card).toHaveTextContent("镜号 #1");
+    expect(card).toHaveTextContent(`场次 ${sceneB}`);
+    await waitFor(() =>
+      expect(screen.getAllByTestId("issued-row")).toHaveLength(1),
+    );
+  });
+
+  it("冲突后刷新页面仍保留原待重试操作，可找回原场次已生效的镜号", async () => {
+    const sceneA = `vitest-ui-A-${crypto.randomUUID()}`;
+    const sceneB = `vitest-ui-B-${crypto.randomUUID()}`;
+    const first = render(<App />);
+    fillForm(sceneA, "吊臂全景");
+    fireEvent.click(screen.getByLabelText(/注入提交后故障/));
+    submit();
+    await screen.findByTestId("error-unavailable");
+
+    // 误切场次重试 -> 冲突
+    fillForm(sceneB, "轨道近景");
+    fireEvent.click(screen.getByLabelText(/注入提交后故障/)); // 关掉注入
+    submit();
+    await screen.findByTestId("error-conflict");
+    first.unmount();
+
+    // 重新打开页面：恢复的仍是原场次、原备注的待重试操作
+    render(<App />);
+    expect(screen.getByTestId("pending-banner")).toBeInTheDocument();
+    expect(screen.getByLabelText("场次")).toHaveValue(sceneA);
+    expect(screen.getByLabelText("备注")).toHaveValue("吊臂全景");
+
+    // 原请求重试 -> 取回原场次已生效的 1 号（重放，不重复占号）
+    submit();
+    const card = await screen.findByTestId("result-card");
+    expect(card).toHaveTextContent("镜号 #1");
+    expect(card).toHaveTextContent("重放结果");
+    expect(card).toHaveTextContent(`场次 ${sceneA}`);
+    await waitFor(() =>
+      expect(screen.getAllByTestId("issued-row")).toHaveLength(1),
+    );
+  });
 });
