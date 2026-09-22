@@ -84,4 +84,67 @@ describe("镜号发放页（真实 API 联调）", () => {
     submit();
     expect(await screen.findByTestId("result-card")).toHaveTextContent("镜号 #1");
   });
+
+  it("切换场次后重试展示冲突并保留原待重试操作，恢复后可取回原镜号", async () => {
+    render(<App />);
+    fillForm("STAGE-A", "吊臂全景");
+    fireEvent.click(screen.getByLabelText(/注入提交后故障/));
+    submit();
+
+    // 首次提交 503：STAGE-A 的 1 号已生效，待重试操作保留
+    await screen.findByTestId("error-unavailable");
+    expect(screen.getByTestId("pending-banner")).toBeInTheDocument();
+
+    // 重试前误切换到 STAGE-B、改备注并关闭注入
+    fireEvent.change(screen.getByLabelText("场次"), { target: { value: "STAGE-B" } });
+    fireEvent.change(screen.getByLabelText("备注"), { target: { value: "轨道近景" } });
+    fireEvent.click(screen.getByLabelText(/注入提交后故障/));
+    submit();
+
+    // 展示冲突，且明确指向首次提交的 STAGE-A 内容
+    const conflict = await screen.findByTestId("error-conflict");
+    expect(conflict).toBeInTheDocument();
+    expect(screen.getByTestId("conflict-existing")).toHaveTextContent("STAGE-A");
+    expect(screen.getByTestId("conflict-existing")).toHaveTextContent("吊臂全景");
+
+    // 原待重试操作仍被保留，场记可以继续找回 STAGE-A 的镜号
+    expect(screen.getByTestId("pending-banner")).toBeInTheDocument();
+
+    // 一键恢复首次提交内容重试：取回 STAGE-A 的 1 号（重放）
+    fireEvent.click(
+      screen.getByRole("button", { name: "恢复首次提交内容并重试" }),
+    );
+    const recovered = await screen.findByTestId("result-card");
+    expect(recovered).toHaveTextContent("镜号 #1");
+    expect(recovered).toHaveTextContent("重放结果");
+    expect(screen.queryByTestId("pending-banner")).not.toBeInTheDocument();
+  });
+
+  it("冲突后以新操作重新提交，为新场次领取从 1 开始的号码", async () => {
+    render(<App />);
+    const sceneA = `vitest-ui-${crypto.randomUUID()}`;
+    fillForm(sceneA, "吊臂全景");
+    fireEvent.click(screen.getByLabelText(/注入提交后故障/));
+    submit();
+    await screen.findByTestId("error-unavailable");
+
+    // 切到另一场次重试 -> 409，待重试操作保留
+    const sceneB = `${sceneA}-b`;
+    fireEvent.change(screen.getByLabelText("场次"), { target: { value: sceneB } });
+    fireEvent.change(screen.getByLabelText("备注"), { target: { value: "轨道近景" } });
+    fireEvent.click(screen.getByLabelText(/注入提交后故障/));
+    submit();
+    await screen.findByTestId("error-conflict");
+    expect(screen.getByTestId("pending-banner")).toBeInTheDocument();
+
+    // 以新操作重新提交：新场次全新标识，号码从 1 开始
+    fireEvent.click(screen.getByRole("button", { name: "以新操作重新提交" }));
+    const card = await screen.findByTestId("result-card");
+    expect(card).toHaveTextContent(`场次 ${sceneB}`);
+    expect(card).toHaveTextContent("镜号 #1");
+    expect(card).not.toHaveTextContent("重放结果");
+    await waitFor(() =>
+      expect(screen.getAllByTestId("issued-row")).toHaveLength(1),
+    );
+  });
 });

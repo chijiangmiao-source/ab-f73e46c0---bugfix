@@ -111,6 +111,10 @@ button.link {
   border: 1px solid #ef4444;
 }
 
+.banner.error .existing {
+  flex-basis: 100%;
+}
+
 .result .shot {
   font-size: 32px;
   font-weight: 700;

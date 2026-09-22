@@ -24,12 +24,16 @@ class SceneCounter(Base):
 
 
 class Operation(Base):
-    """client_op_id -> 已发放镜号的不可变映射，同时记录内容哈希用于冲突检测。"""
+    """client_op_id -> 已发放镜号的不可变映射，同时记录内容哈希用于冲突检测。
+
+    client_op_id 是全局身份：一个标识永远只代表首次提交的操作（与场次无关），
+    因此其唯一约束直接作用于 client_op_id 单列，跨场次也不可能二次占号。
+    """
 
     __tablename__ = "operations"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    client_op_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    client_op_id: Mapped[str] = mapped_column(String(64), nullable=False)
     scene_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     notes: Mapped[str] = mapped_column(String(2000), nullable=False, default="")
     payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -37,6 +41,6 @@ class Operation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
     __table_args__ = (
-        UniqueConstraint("scene_id", "client_op_id", name="uq_operations_scene_client_op"),
+        UniqueConstraint("client_op_id", name="uq_operations_client_op"),
         UniqueConstraint("scene_id", "shot_number", name="uq_operations_scene_shot"),
     )

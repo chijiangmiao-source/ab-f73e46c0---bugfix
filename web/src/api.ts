@@ -7,6 +7,8 @@ export class NetworkError extends Error {}
 export class ApiError extends Error {
   status: number;
   code: string;
+  /** 409 时服务端返回的首次提交内容（权威映射） */
+  existing?: { scene_id: string; notes: string };
   constructor(status: number, code: string, message: string) {
     super(message);
     this.status = status;
@@ -37,16 +39,22 @@ function apiBase(): string {
 async function parseError(res: Response): Promise<never> {
   let code = "unknown";
   let message = `请求失败（HTTP ${res.status}）`;
+  let existing: { scene_id: string; notes: string } | undefined;
   try {
     const body = await res.json();
     if (body?.detail?.code || body?.detail?.error) {
       code = body.detail.code ?? body.detail.error;
     }
     if (body?.detail?.message) message = body.detail.message;
+    if (body?.detail?.existing) existing = body.detail.existing;
   } catch {
     /* 保留默认信息 */
   }
-  if (res.status === 409) throw new ConflictError(409, code, message);
+  if (res.status === 409) {
+    const err = new ConflictError(409, code, message);
+    err.existing = existing;
+    throw err;
+  }
   if (res.status === 503) throw new ServiceUnavailableError(503, code, message);
   throw new ApiError(res.status, code, message);
 }

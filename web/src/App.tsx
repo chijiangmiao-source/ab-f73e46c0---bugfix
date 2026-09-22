@@ -20,6 +20,8 @@ type ErrorKind = "conflict" | "unavailable" | "network" | "unknown";
 interface ErrorState {
   kind: ErrorKind;
   message: string;
+  /** 409 时服务端给出的首次提交内容（权威映射） */
+  existing?: { scene_id: string; notes: string };
 }
 
 const PENDING_KEY = "shotnumbers.pendingOp.v1";
@@ -99,7 +101,13 @@ export default function App() {
     } catch (err) {
       // 失败一律保留待重试操作，由用户决定何时重试
       if (err instanceof ConflictError) {
-        setError({ kind: "conflict", message: err.message });
+        // 409 不清除待重试操作：client_op_id 仍属于首次提交，
+        // 场记随时可以恢复首次提交内容重试取回原镜号。
+        setError({
+          kind: "conflict",
+          message: err.message,
+          existing: err.existing,
+        });
       } else if (err instanceof ServiceUnavailableError) {
         setError({
           kind: "unavailable",
@@ -133,10 +141,14 @@ export default function App() {
   function handleSubmit(ev: FormEvent) {
     ev.preventDefault();
     if (submitting) return;
-    // 有待重试操作时复用其 client_op_id —— 重试同一逻辑操作而非新建操作
+    // 有待重试操作时复用其 client_op_id —— 重试同一逻辑操作而非新建操作。
     const op = buildOp(pending?.client_op_id ?? newOpId());
-    setPending(op);
-    savePending(op);
+    // 仅在首次提交时持久化待重试态；重试期间绝不用当前表单内容覆盖原操作，
+    // 否则切换场次/改备注后一旦 409，首次提交内容将无从找回。
+    if (!pending) {
+      setPending(op);
+      savePending(op);
+    }
     void attempt(op);
   }
 
@@ -145,6 +157,16 @@ export default function App() {
     const op = buildOp(newOpId());
     setPending(op);
     savePending(op);
+    void attempt(op);
+  }
+
+  function handleRecoverOriginal() {
+    // 按首次提交的内容原样重试 —— 服务端以重放返回最初的镜号。
+    if (submitting || !pending) return;
+    const op = pending;
+    setSceneId(op.scene_id);
+    setNotes(op.notes);
+    setInject(op.inject);
     void attempt(op);
   }
 
@@ -210,6 +232,22 @@ export default function App() {
               <>
                 <strong>内容冲突：</strong>
                 {error.message}
+                {error.existing && (
+                  <span className="existing" data-testid="conflict-existing">
+                    该操作标识首次提交于场次「{error.existing.scene_id}」，备注「
+                    {error.existing.notes || "—"}」。当前场次不会占用新号码。
+                  </span>
+                )}
+                {pending && (
+                  <button
+                    type="button"
+                    className="link"
+                    onClick={handleRecoverOriginal}
+                    disabled={submitting}
+                  >
+                    恢复首次提交内容并重试
+                  </button>
+                )}
                 <button
                   type="button"
                   className="link"

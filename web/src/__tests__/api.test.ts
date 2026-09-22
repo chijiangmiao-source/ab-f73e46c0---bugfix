@@ -38,6 +38,23 @@ describe("allocateShotNumber（真实 API 联调）", () => {
     ).rejects.toBeInstanceOf(ConflictError);
   });
 
+  it("同一标识换场次提交抛 409，且错误指明首次提交场次", async () => {
+    const s1 = scene();
+    const s2 = `other-${crypto.randomUUID()}`;
+    const id = opId();
+    await allocateShotNumber({ scene_id: s1, client_op_id: id, notes: "吊臂全景" });
+    await expect(
+      allocateShotNumber({ scene_id: s2, client_op_id: id, notes: "轨道近景" }),
+    ).rejects.toBeInstanceOf(ConflictError);
+    // 新场次未推进计数：全新操作仍从 1 开始
+    const fresh = await allocateShotNumber({
+      scene_id: s2,
+      client_op_id: opId(),
+      notes: "轨道近景",
+    });
+    expect(fresh.shot_number).toBe(1);
+  });
+
   it("注入故障只生效一次，重试取回原号码且不再触发", async () => {
     const s = scene();
     const req = {

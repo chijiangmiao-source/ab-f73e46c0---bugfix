@@ -80,8 +80,8 @@ def create_app(db_path: str | None = None, dev_mode: bool | None = None) -> Fast
         return [_to_item(op) for op in service.list_shot_numbers(engine, scene_id)]
 
     @app.get("/api/operations/{client_op_id}", response_model=ShotNumberItem)
-    def get_operation(client_op_id: str, scene_id: str | None = None) -> ShotNumberItem:
-        op = service.get_operation(engine, client_op_id, scene_id=scene_id)
+    def get_operation(client_op_id: str) -> ShotNumberItem:
+        op = service.get_operation(engine, client_op_id)
         if op is None:
             raise HTTPException(status_code=404, detail={"error": "not_found"})
         return _to_item(op)

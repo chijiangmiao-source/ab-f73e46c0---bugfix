@@ -2,7 +2,8 @@
 
 事务边界（见 README）：
     BEGIN IMMEDIATE
-        1. 按 client_op_id 查操作映射 —— 命中则校验内容哈希并直接重放原号码；
+        1. 按 client_op_id 全局查操作映射 —— 命中则校验内容哈希并直接重放原号码
+           （client_op_id 是全局身份，与场次无关，跨场次重提一律按首次内容冲突处理）；
         2. 否则在同一事务内读取并递增场次计数器、写入操作映射；
     COMMIT  —— 提交点即号码生效点，之后即使进程崩溃结果也已持久化。
 
@@ -15,7 +16,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 
-from sqlalchemy import and_, insert, select, update
+from sqlalchemy import insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 
@@ -23,7 +24,7 @@ from .models import Operation, SceneCounter
 
 
 class PayloadConflictError(Exception):
-    """同一 client_op_id 携带了与首次提交不同的内容。"""
+    """同一 client_op_id 携带了与首次提交不同的内容（含切换场次重提）。"""
 
     def __init__(self, client_op_id: str, existing_scene_id: str, existing_notes: str):
         self.client_op_id = client_op_id
@@ -41,18 +42,6 @@ class Allocation:
     created: bool  # True=本次新发放；False=重放既有映射
 
 
-@dataclass(frozen=True)
-class OperationScope:
-    scene_id: str
-    client_op_id: str
-
-    def predicate(self):
-        return and_(
-            Operation.scene_id == self.scene_id,
-            Operation.client_op_id == self.client_op_id,
-        )
-
-
 def content_hash(scene_id: str, notes: str) -> str:
     canonical = json.dumps(
         {"scene_id": scene_id, "notes": notes},
@@ -68,19 +57,23 @@ def allocate_shot_number(
 ) -> Allocation:
     """在单个 IMMEDIATE 事务内完成幂等检查与发号，提交后返回。"""
     digest = content_hash(scene_id, notes)
-    scope = OperationScope(scene_id=scene_id, client_op_id=client_op_id)
     with engine.connect() as conn:
         conn.exec_driver_sql("BEGIN IMMEDIATE")
         try:
+            # 全局身份检查：只按 client_op_id 查找，不按场次收窄。
+            # 首次提交（哪怕在另一个场次）即权威，跨场次重提必然哈希不同 -> 409。
             existing = conn.execute(
                 select(Operation.shot_number, Operation.payload_hash, Operation.scene_id, Operation.notes)
-                .where(scope.predicate())
+                .where(Operation.client_op_id == client_op_id)
             ).mappings().first()
             if existing is not None:
                 if existing["payload_hash"] != digest:
                     raise PayloadConflictError(client_op_id, existing["scene_id"], existing["notes"])
                 conn.exec_driver_sql("COMMIT")
-                return Allocation(scene_id, client_op_id, notes, existing["shot_number"], created=False)
+                return Allocation(
+                    existing["scene_id"], client_op_id, existing["notes"],
+                    existing["shot_number"], created=False,
+                )
 
             conn.execute(
                 sqlite_insert(SceneCounter)
@@ -130,13 +123,10 @@ def list_shot_numbers(engine: Engine, scene_id: str) -> list[dict]:
         return [dict(row) for row in rows]
 
 
-def get_operation(engine: Engine, client_op_id: str, scene_id: str | None = None) -> dict | None:
+def get_operation(engine: Engine, client_op_id: str) -> dict | None:
+    # client_op_id 全局唯一，任何时候都只能查到首次提交的那一条映射。
     with engine.connect() as conn:
-        statement = select(*_OPERATION_COLUMNS).where(Operation.client_op_id == client_op_id)
-        if scene_id is not None:
-            statement = statement.where(
-                OperationScope(scene_id=scene_id, client_op_id=client_op_id).predicate()
-            )
-        statement = statement.order_by(Operation.id.desc())
-        row = conn.execute(statement).mappings().first()
+        row = conn.execute(
+            select(*_OPERATION_COLUMNS).where(Operation.client_op_id == client_op_id)
+        ).mappings().first()
         return dict(row) if row is not None else None
